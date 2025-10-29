@@ -1,499 +1,288 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Drowning Alert System - Live Dashboard</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+#include <ESP8266WiFi.h>
+#include <FirebaseESP8266.h>
+#include <SoftwareSerial.h>
+#include <addons/TokenHelper.h>
 
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
+// Pin Definitions
+#define HC12_RX D2  // GPIO4
+#define HC12_TX D1  // GPIO5
+#define BUZZER_PIN D5  // GPIO14
+#define STATUS_LED D4  // GPIO2
 
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-        }
+// WiFi Credentials
+#define WIFI_SSID "vivo T4 lite"  // Replace with your WiFi name
+#define WIFI_PASSWORD "********"  // Replace with your WiFi password
 
-        header {
-            background: white;
-            padding: 30px;
-            border-radius: 15px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            margin-bottom: 30px;
-            text-align: center;
-        }
+// Firebase Credentials
+#define FIREBASE_HOST "airbagsystemlive-default-rtdb.firebaseio.com"
+#define FIREBASE_AUTH "aXdufJj388zwrYHzlktz7kh2bppsPkhXDNZJXpQW"
 
-        h1 {
-            color: #333;
-            font-size: 2.5em;
-            margin-bottom: 10px;
-        }
+// Objects
+SoftwareSerial hc12(HC12_RX, HC12_TX);
+FirebaseData firebaseData;
+FirebaseAuth auth;
+FirebaseConfig config;
 
-        .subtitle {
-            color: #666;
-            font-size: 1.1em;
-        }
+// Variables
+bool alertActive = false;
+unsigned long lastAlertTime = 0;
+int alertCount = 0;
+int surfaceUpdateCount = 0;
 
-        .status-bar {
-            display: flex;
-            gap: 20px;
-            margin-bottom: 30px;
-            flex-wrap: wrap;
-        }
+void setup() {
+  Serial.begin(9600);  // Changed to 9600 baud
+  hc12.begin(9600);
 
-        .status-card {
-            flex: 1;
-            min-width: 200px;
-            background: white;
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-        }
+  // Pin modes
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(STATUS_LED, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(STATUS_LED, LOW);
 
-        .status-card h3 {
-            color: #666;
-            font-size: 0.9em;
-            margin-bottom: 10px;
-            text-transform: uppercase;
-        }
+  // Connect to WiFi
+  Serial.println(F("\nConnecting to WiFi..."));
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-        .status-value {
-            font-size: 2em;
-            font-weight: bold;
-            color: #333;
-        }
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    digitalWrite(STATUS_LED, !digitalRead(STATUS_LED));
+    attempts++;
+  }
 
-        .status-card.emergency {
-            background: #ff4444;
-            color: white;
-            animation: pulse 2s infinite;
-        }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println(F("\nWiFi Connected!"));
+    Serial.print(F("IP Address: "));
+    Serial.println(WiFi.localIP());
+    digitalWrite(STATUS_LED, HIGH);
+  } else {
+    Serial.println(F("\nWiFi Connection Failed!"));
+    // Continue anyway to receive LoRa data
+  }
 
-        .status-card.emergency h3,
-        .status-card.emergency .status-value {
-            color: white;
-        }
+  // Configure Firebase
+  config.host = FIREBASE_HOST;
+  config.signer.tokens.legacy_token = FIREBASE_AUTH;
 
-        @keyframes pulse {
-            0%, 100% { transform: scale(1); }
-            50% { transform: scale(1.05); }
-        }
+  // Initialize Firebase
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+  firebaseData.setBSSLBufferSize(1024, 1024);
+  firebaseData.setResponseSize(1024);
 
-        .main-content {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 30px;
-            margin-bottom: 30px;
-        }
+  Serial.println(F("External Unit Ready - Listening for alerts..."));
+  playStartupTone();
+}
 
-        @media (max-width: 968px) {
-            .main-content {
-                grid-template-columns: 1fr;
-            }
-        }
+void loop() {
+  // Check for incoming LoRa data
+  if (hc12.available()) {
+    String receivedData = hc12.readStringUntil('\n');
+    receivedData.trim();
 
-        .panel {
-            background: white;
-            padding: 30px;
-            border-radius: 15px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-        }
+    Serial.print(F("Received: "));
+    Serial.println(receivedData);
 
-        .panel h2 {
-            color: #333;
-            margin-bottom: 20px;
-            font-size: 1.5em;
-            border-bottom: 3px solid #667eea;
-            padding-bottom: 10px;
-        }
+    // Check if it's an alert message
+    if (receivedData.startsWith("EMERGENCY!")) {
+      handleEmergencyAlert(receivedData);
+    } else if (receivedData.startsWith("SURFACE")) {
+      handleSurfaceUpdate(receivedData);
+    }
+  }
 
-        #map {
-            width: 100%;
-            height: 400px;
-            border-radius: 10px;
-            background: #e0e0e0;
-            margin-top: 20px;
-        }
+  // If alert is active, keep buzzer going
+  if (alertActive) {
+    playAlertSound();
 
-        .info-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 15px;
-            border-bottom: 1px solid #eee;
-        }
+    // Auto-stop alert after 5 minutes
+    if (millis() - lastAlertTime > 300000) {
+      alertActive = false;
+      digitalWrite(BUZZER_PIN, LOW);
+      Serial.println(F("Alert timeout - stopping buzzer"));
+    }
+  }
 
-        .info-row:last-child {
-            border-bottom: none;
-        }
+  delay(100);
+}
 
-        .info-label {
-            font-weight: bold;
-            color: #666;
-        }
+void handleEmergencyAlert(String alertData) {
+  alertActive = true;
+  lastAlertTime = millis();
+  alertCount++;
 
-        .info-value {
-            color: #333;
-        }
+  Serial.println(F("!!! DROWNING ALERT RECEIVED !!!"));
 
-        .alert-list {
-            max-height: 400px;
-            overflow-y: auto;
-        }
+  float latitude = 0;
+  float longitude = 0;
+  float pressure = 0;
+  long timestamp = 0;
 
-        .alert-item {
-            padding: 15px;
-            margin-bottom: 10px;
-            border-radius: 8px;
-            background: #f8f9fa;
-            border-left: 4px solid #667eea;
-        }
+  // Extract values
+  int latIndex = alertData.indexOf("LAT:");
+  int lonIndex = alertData.indexOf("LON:");
+  int pressureIndex = alertData.indexOf("PRESSURE:");
+  int timeIndex = alertData.indexOf("TIME:");
 
-        .alert-item.emergency {
-            background: #ffe5e5;
-            border-left: 4px solid #ff4444;
-        }
+  if (latIndex != -1) {
+    latitude = alertData.substring(latIndex + 4, lonIndex).toFloat();
+  }
+  if (lonIndex != -1) {
+    longitude = alertData.substring(lonIndex + 4, pressureIndex).toFloat();
+  }
+  if (pressureIndex != -1) {
+    pressure = alertData.substring(pressureIndex + 9, timeIndex).toFloat();
+  }
+  if (timeIndex != -1) {
+    timestamp = alertData.substring(timeIndex + 5).toInt();
+  }
 
-        .alert-time {
-            font-size: 0.85em;
-            color: #999;
-            margin-bottom: 5px;
-        }
+  Serial.print(F("Location: "));
+  Serial.print(latitude, 6);
+  Serial.print(F(", "));
+  Serial.println(longitude, 6);
+  Serial.print(F("Pressure: "));
+  Serial.print(pressure);
+  Serial.println(F(" hPa"));
 
-        .alert-location {
-            font-family: monospace;
-            color: #333;
-        }
+  // Send to Firebase
+  if (WiFi.status() == WL_CONNECTED) {
+    sendEmergencyToFirebase(latitude, longitude, pressure, timestamp);
+  } else {
+    Serial.println(F("WiFi not connected - cannot send to Firebase"));
+  }
 
-        .no-data {
-            text-align: center;
-            padding: 40px;
-            color: #999;
-            font-style: italic;
-        }
+  // Play alert sound
+  playAlertSound();
+}
 
-        .loading {
-            text-align: center;
-            padding: 20px;
-            color: #667eea;
-            font-size: 1.1em;
-        }
+void handleSurfaceUpdate(String surfaceData) {
+  surfaceUpdateCount++;
 
-        .coordinate-link {
-            color: #667eea;
-            text-decoration: none;
-            font-weight: bold;
-        }
+  float latitude = 0;
+  float longitude = 0;
+  float pressure = 0;
+  long timestamp = 0;
 
-        .coordinate-link:hover {
-            text-decoration: underline;
-        }
+  // Extract values
+  int latIndex = surfaceData.indexOf("LAT:");
+  int lonIndex = surfaceData.indexOf("LON:");
+  int pressureIndex = surfaceData.indexOf("PRESSURE:");
+  int timeIndex = surfaceData.indexOf("TIME:");
 
-        .badge {
-            display: inline-block;
-            padding: 5px 10px;
-            border-radius: 20px;
-            font-size: 0.85em;
-            font-weight: bold;
-        }
+  if (latIndex != -1) {
+    latitude = surfaceData.substring(latIndex + 4, lonIndex).toFloat();
+  }
+  if (lonIndex != -1) {
+    longitude = surfaceData.substring(lonIndex + 4, pressureIndex).toFloat();
+  }
+  if (pressureIndex != -1) {
+    pressure = surfaceData.substring(pressureIndex + 9, timeIndex).toFloat();
+  }
+  if (timeIndex != -1) {
+    timestamp = surfaceData.substring(timeIndex + 5).toInt();
+  }
 
-        .badge.tracking {
-            background: #e3f2fd;
-            color: #1976d2;
-        }
+  Serial.print(F("Surface Location: "));
+  Serial.print(latitude, 6);
+  Serial.print(F(", "));
+  Serial.println(longitude, 6);
+  Serial.print(F("Pressure: "));
+  Serial.print(pressure);
+  Serial.println(F(" hPa"));
 
-        .badge.emergency {
-            background: #ffebee;
-            color: #c62828;
-        }
+  // Send to Firebase
+  if (WiFi.status() == WL_CONNECTED) {
+    sendSurfaceToFirebase(latitude, longitude, pressure, timestamp);
+  } else {
+    Serial.println(F("WiFi not connected - cannot send surface update to Firebase"));
+  }
+}
 
-        .last-update {
-            text-align: center;
-            color: white;
-            margin-top: 20px;
-            font-size: 0.9em;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <h1>🛟 Drowning Alert System</h1>
-            <p class="subtitle">Real-Time Monitoring Dashboard</p>
-        </header>
+void sendEmergencyToFirebase(float lat, float lon, float pressure, long timestamp) {
+  // Create a unique emergency ID based on timestamp
+  String emergencyPath = "/emergencies/emergency_" + String(timestamp);
 
-        <div class="status-bar">
-            <div class="status-card" id="statusCard">
-                <h3>System Status</h3>
-                <div class="status-value" id="systemStatus">Connecting...</div>
-            </div>
-            <div class="status-card">
-                <h3>Total Updates</h3>
-                <div class="status-value" id="totalUpdates">0</div>
-            </div>
-            <div class="status-card">
-                <h3>Emergencies</h3>
-                <div class="status-value" id="totalEmergencies">0</div>
-            </div>
-            <div class="status-card">
-                <h3>Last Contact</h3>
-                <div class="status-value" id="lastContact" style="font-size: 1.2em;">Never</div>
-            </div>
-        </div>
+  // Prepare JSON data
+  FirebaseJson json;
+  json.set("latitude", lat);
+  json.set("longitude", lon);
+  json.set("pressure", pressure);
+  json.set("timestamp", timestamp);
+  json.set("alertCount", alertCount);
+  json.set("status", "ACTIVE");
+  json.set("receivedAt", String(millis() / 1000));
+  json.set("type", "EMERGENCY");
 
-        <div class="main-content">
-            <div class="panel">
-                <h2>📍 Current Location</h2>
-                <div id="currentLocationInfo">
-                    <div class="loading">Waiting for data...</div>
-                </div>
-                <div id="map"></div>
-            </div>
+  // Send to Firebase (list of emergencies)
+  Serial.print(F("Sending to Firebase: "));
+  Serial.println(emergencyPath);
 
-            <div class="panel">
-                <h2>📋 Recent Activity</h2>
-                <div class="alert-list" id="alertList">
-                    <div class="loading">Loading activity...</div>
-                </div>
-            </div>
-        </div>
+  if (Firebase.setJSON(firebaseData, emergencyPath, json)) {
+    Serial.println(F("Firebase update successful!"));
 
-        <div class="last-update">
-            Last updated: <span id="lastUpdateTime">Never</span>
-        </div>
-    </div>
+    // Also update latest emergency (for dashboard real-time)
+    Firebase.setJSON(firebaseData, "/latestEmergency", json);
 
-    <script type="module">
-        // Firebase Configuration
-        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
-        import { getDatabase, ref, onValue, query, limitToLast, orderByKey } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js';
+    // Blink LED to confirm
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(STATUS_LED, LOW);
+      delay(100);
+      digitalWrite(STATUS_LED, HIGH);
+      delay(100);
+    }
+  } else {
+    Serial.print(F("Firebase update failed: "));
+    Serial.println(firebaseData.errorReason());
+  }
+}
 
-        const firebaseConfig = {
-            databaseURL: "https://airbagsystemlive-default-rtdb.firebaseio.com"
-        };
+void sendSurfaceToFirebase(float lat, float lon, float pressure, long timestamp) {
+  String trackingPath = "/tracking/tracking_" + String(timestamp);
 
-        const app = initializeApp(firebaseConfig);
-        const database = getDatabase(app);
+  FirebaseJson json;
+  json.set("latitude", lat);
+  json.set("longitude", lon);
+  json.set("pressure", pressure);
+  json.set("timestamp", timestamp);
+  json.set("status", "SURFACE");
+  json.set("type", "TRACKING");
 
-        let map, marker;
-        let allAlerts = [];
+  // Send to Firebase (list of tracking updates)
+  if (Firebase.setJSON(firebaseData, trackingPath, json)) {
+    Serial.println(F("Surface tracking update successful!"));
+    // Also update latest location
+    Firebase.setJSON(firebaseData, "/latestLocation", json);
+  } else {
+    Serial.print(F("Surface tracking update failed: "));
+    Serial.println(firebaseData.errorReason());
+  }
+}
 
-        // Initialize Google Maps
-        function initMap() {
-            const defaultLocation = { lat: 25.2048, lng: 55.2708 }; // Dubai default
-            
-            map = new google.maps.Map(document.getElementById('map'), {
-                center: defaultLocation,
-                zoom: 12,
-                mapTypeId: 'hybrid'
-            });
+void playAlertSound() {
+  // Create urgent siren pattern
+  for (int i = 0; i < 3; i++) {
+    // Rising tone
+    for (int freq = 800; freq < 2000; freq += 100) {
+      tone(BUZZER_PIN, freq, 50);
+      delay(50);
+    }
+    // Falling tone
+    for (int freq = 2000; freq > 800; freq -= 100) {
+      tone(BUZZER_PIN, freq, 50);
+      delay(50);
+    }
+  }
+  noTone(BUZZER_PIN);
+  delay(500);
+}
 
-            marker = new google.maps.Marker({
-                map: map,
-                title: 'User Location'
-            });
-        }
-
-        // Update map with new location
-        function updateMap(lat, lon, isEmergency) {
-            if (lat === 0 && lon === 0) return;
-            
-            const position = { lat: parseFloat(lat), lng: parseFloat(lon) };
-            map.setCenter(position);
-            map.setZoom(15);
-            
-            marker.setPosition(position);
-            marker.setIcon({
-                url: isEmergency ? 
-                    'http://maps.google.com/mapfiles/ms/icons/red-dot.png' : 
-                    'http://maps.google.com/mapfiles/ms/icons/blue-dot.png'
-            });
-        }
-
-        // Format timestamp
-        function formatTime(timestamp) {
-            if (!timestamp) return 'Unknown';
-            const date = new Date(timestamp * 1000);
-            return date.toLocaleString();
-        }
-
-        // Format relative time
-        function getRelativeTime(timestamp) {
-            if (!timestamp) return 'Never';
-            const now = Date.now() / 1000;
-            const diff = now - timestamp;
-            
-            if (diff < 60) return 'Just now';
-            if (diff < 3600) return Math.floor(diff / 60) + ' min ago';
-            if (diff < 86400) return Math.floor(diff / 3600) + ' hrs ago';
-            return Math.floor(diff / 86400) + ' days ago';
-        }
-
-        // Update current location panel
-        function updateCurrentLocation(data, isEmergency) {
-            const html = `
-                <div class="info-row">
-                    <span class="info-label">Status:</span>
-                    <span class="info-value">
-                        <span class="badge ${isEmergency ? 'emergency' : 'tracking'}">
-                            ${isEmergency ? '🚨 EMERGENCY' : '📡 Tracking'}
-                        </span>
-                    </span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Latitude:</span>
-                    <span class="info-value">${data.latitude.toFixed(6)}</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Longitude:</span>
-                    <span class="info-value">${data.longitude.toFixed(6)}</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Pressure:</span>
-                    <span class="info-value">${data.pressure} hPa</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Timestamp:</span>
-                    <span class="info-value">${formatTime(data.timestamp)}</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Google Maps:</span>
-                    <span class="info-value">
-                        <a href="https://www.google.com/maps?q=${data.latitude},${data.longitude}" 
-                           target="_blank" class="coordinate-link">
-                           Open in Maps →
-                        </a>
-                    </span>
-                </div>
-            `;
-            document.getElementById('currentLocationInfo').innerHTML = html;
-        }
-
-        // Add alert to list
-        function addAlertToList(key, data) {
-            const isEmergency = data.type === 'EMERGENCY';
-            const alertItem = document.createElement('div');
-            alertItem.className = alert-item ${isEmergency ? 'emergency' : ''};
-            alertItem.innerHTML = `
-                <div class="alert-time">${formatTime(data.timestamp)}</div>
-                <div><strong>${isEmergency ? '🚨 EMERGENCY ALERT' : '📍 Surface Update'}</strong></div>
-                <div class="alert-location">
-                    Lat: ${data.latitude.toFixed(6)}, Lon: ${data.longitude.toFixed(6)}
-                </div>
-                <div style="margin-top: 5px; font-size: 0.9em; color: #666;">
-                    Pressure: ${data.pressure} hPa
-                </div>
-            `;
-            return alertItem;
-        }
-
-        // Listen to latest emergency
-        const latestEmergencyRef = ref(database, 'latestEmergency');
-        onValue(latestEmergencyRef, (snapshot) => {
-            const data = snapshot.val();
-            if (data) {
-                updateCurrentLocation(data, true);
-                updateMap(data.latitude, data.longitude, true);
-                
-                document.getElementById('systemStatus').textContent = '🚨 EMERGENCY';
-                document.getElementById('statusCard').classList.add('emergency');
-                document.getElementById('lastContact').textContent = getRelativeTime(data.timestamp);
-                document.getElementById('lastUpdateTime').textContent = new Date().toLocaleTimeString();
-            }
-        });
-
-        // Listen to latest location
-        const latestLocationRef = ref(database, 'latestLocation');
-        onValue(latestLocationRef, (snapshot) => {
-            const data = snapshot.val();
-            if (data && !document.getElementById('statusCard').classList.contains('emergency')) {
-                updateCurrentLocation(data, false);
-                updateMap(data.latitude, data.longitude, false);
-                
-                document.getElementById('systemStatus').textContent = 'Active';
-                document.getElementById('lastContact').textContent = getRelativeTime(data.timestamp);
-                document.getElementById('lastUpdateTime').textContent = new Date().toLocaleTimeString();
-            }
-        });
-
-        // Listen to all tracking updates
-        const trackingRef = query(ref(database, 'tracking'), orderByKey(), limitToLast(10));
-        onValue(trackingRef, (snapshot) => {
-            const data = snapshot.val();
-            if (data) {
-                const count = Object.keys(data).length;
-                document.getElementById('totalUpdates').textContent = count;
-            }
-        });
-
-        // Listen to all emergencies
-        const emergenciesRef = query(ref(database, 'emergencies'), orderByKey(), limitToLast(10));
-        onValue(emergenciesRef, (snapshot) => {
-            const data = snapshot.val();
-            if (data) {
-                const count = Object.keys(data).length;
-                document.getElementById('totalEmergencies').textContent = count;
-            }
-        });
-
-        // Combine and display all recent activity
-        function updateActivityList() {
-            const listContainer = document.getElementById('alertList');
-            listContainer.innerHTML = '';
-
-            if (allAlerts.length === 0) {
-                listContainer.innerHTML = '<div class="no-data">No activity yet</div>';
-                return;
-            }
-
-            // Sort by timestamp (newest first)
-            allAlerts.sort((a, b) => b.data.timestamp - a.data.timestamp);
-
-            // Show latest 10
-            allAlerts.slice(0, 10).forEach(alert => {
-                listContainer.appendChild(addAlertToList(alert.key, alert.data));
-            });
-        }
-
-        // Listen to tracking updates
-        onValue(trackingRef, (snapshot) => {
-            allAlerts = allAlerts.filter(a => a.type !== 'tracking');
-            snapshot.forEach((child) => {
-                allAlerts.push({
-                    key: child.key,
-                    data: child.val(),
-                    type: 'tracking'
-                });
-            });
-            updateActivityList();
-        });
-
-        // Listen to emergencies
-        onValue(emergenciesRef, (snapshot) => {
-            allAlerts = allAlerts.filter(a => a.type !== 'emergency');
-            snapshot.forEach((child) => {
-                allAlerts.push({
-                    key: child.key,
-                    data: child.val(),
-                    type: 'emergency'
-                });
-            });
-            updateActivityList();
-        });
-
-        // Initialize map when script loads
-        window.initMap = initMap;
-    </script>
-
-    <!-- Google Maps API -->
-    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBFw0Qbyq9zTFTd-tUY6dZWTgaQzuU17R8&callback=initMap" async defer></script>
-</body>
-</html>
+void playStartupTone() {
+  // Play startup confirmation
+  tone(BUZZER_PIN, 1000, 200);
+  delay(300);
+  tone(BUZZER_PIN, 1500, 200);
+  delay(300);
+  noTone(BUZZER_PIN);
+}
