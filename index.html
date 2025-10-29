@@ -381,7 +381,7 @@
         function addAlertToList(key, data) {
             const isEmergency = data.type === 'EMERGENCY';
             const alertItem = document.createElement('div');
-            alertItem.className = alert-item ${isEmergency ? 'emergency' : ''};
+           alertItem.className = `alert-item${isEmergency ? ' emergency' : ''}`;
             alertItem.innerHTML = `
                 <div class="alert-time">${formatTime(data.timestamp)}</div>
                 <div><strong>${isEmergency ? '🚨 EMERGENCY ALERT' : '📍 Surface Update'}</strong></div>
