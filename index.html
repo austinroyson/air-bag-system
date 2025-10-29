@@ -285,11 +285,11 @@
 
         let map, marker;
         let allAlerts = [];
+        let emergencyActive = false;
 
         // Initialize Google Maps
         function initMap() {
             const defaultLocation = { lat: 25.2048, lng: 55.2708 }; // Dubai default
-            
             map = new google.maps.Map(document.getElementById('map'), {
                 center: defaultLocation,
                 zoom: 12,
@@ -305,15 +305,14 @@
         // Update map with new location
         function updateMap(lat, lon, isEmergency) {
             if (lat === 0 && lon === 0) return;
-            
             const position = { lat: parseFloat(lat), lng: parseFloat(lon) };
             map.setCenter(position);
             map.setZoom(15);
-            
+
             marker.setPosition(position);
             marker.setIcon({
-                url: isEmergency ? 
-                    'http://maps.google.com/mapfiles/ms/icons/red-dot.png' : 
+                url: isEmergency ?
+                    'http://maps.google.com/mapfiles/ms/icons/red-dot.png' :
                     'http://maps.google.com/mapfiles/ms/icons/blue-dot.png'
             });
         }
@@ -325,12 +324,10 @@
             return date.toLocaleString();
         }
 
-        // Format relative time
         function getRelativeTime(timestamp) {
             if (!timestamp) return 'Never';
             const now = Date.now() / 1000;
             const diff = now - timestamp;
-            
             if (diff < 60) return 'Just now';
             if (diff < 3600) return Math.floor(diff / 60) + ' min ago';
             if (diff < 86400) return Math.floor(diff / 3600) + ' hrs ago';
@@ -367,7 +364,7 @@
                 <div class="info-row">
                     <span class="info-label">Google Maps:</span>
                     <span class="info-value">
-                        <a href="https://www.google.com/maps?q=${data.latitude},${data.longitude}" 
+                        <a href="https://www.google.com/maps?q=${data.latitude},${data.longitude}"
                            target="_blank" class="coordinate-link">
                            Open in Maps →
                         </a>
@@ -378,10 +375,10 @@
         }
 
         // Add alert to list
-        function addAlertToList(key, data) {
-            const isEmergency = data.type === 'EMERGENCY';
+        function addAlertToList(key, data, type) {
+            const isEmergency = type === 'emergency' || data.type === 'EMERGENCY';
             const alertItem = document.createElement('div');
-           alertItem.className = alert-item${isEmergency ? ' emergency' : ''};
+            alertItem.className = `alert-item${isEmergency ? ' emergency' : ''}`;
             alertItem.innerHTML = `
                 <div class="alert-time">${formatTime(data.timestamp)}</div>
                 <div><strong>${isEmergency ? '🚨 EMERGENCY ALERT' : '📍 Surface Update'}</strong></div>
@@ -399,10 +396,11 @@
         const latestEmergencyRef = ref(database, 'latestEmergency');
         onValue(latestEmergencyRef, (snapshot) => {
             const data = snapshot.val();
-            if (data) {
+            if (data && data.type === "EMERGENCY") {
+                emergencyActive = true;
                 updateCurrentLocation(data, true);
                 updateMap(data.latitude, data.longitude, true);
-                
+
                 document.getElementById('systemStatus').textContent = '🚨 EMERGENCY';
                 document.getElementById('statusCard').classList.add('emergency');
                 document.getElementById('lastContact').textContent = getRelativeTime(data.timestamp);
@@ -414,13 +412,15 @@
         const latestLocationRef = ref(database, 'latestLocation');
         onValue(latestLocationRef, (snapshot) => {
             const data = snapshot.val();
-            if (data && !document.getElementById('statusCard').classList.contains('emergency')) {
+            if (data && (!emergencyActive || data.type !== "EMERGENCY")) {
                 updateCurrentLocation(data, false);
                 updateMap(data.latitude, data.longitude, false);
-                
+
                 document.getElementById('systemStatus').textContent = 'Active';
+                document.getElementById('statusCard').classList.remove('emergency');
                 document.getElementById('lastContact').textContent = getRelativeTime(data.timestamp);
                 document.getElementById('lastUpdateTime').textContent = new Date().toLocaleTimeString();
+                emergencyActive = false;
             }
         });
 
@@ -459,7 +459,7 @@
 
             // Show latest 10
             allAlerts.slice(0, 10).forEach(alert => {
-                listContainer.appendChild(addAlertToList(alert.key, alert.data));
+                listContainer.appendChild(addAlertToList(alert.key, alert.data, alert.type));
             });
         }
 
