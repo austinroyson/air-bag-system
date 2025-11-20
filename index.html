@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Drowning Alert System - Live Dashboard</title>
     <style>
+        /* ...keep all your existing CSS... */
         * {
             margin: 0;
             padding: 0;
@@ -317,11 +318,25 @@
             });
         }
 
-        // Format timestamp
+        // Utility: pad number with zeros
+        function pad(n) {
+            return n < 10 ? '0' + n : n;
+        }
+
+        // Format timestamp correctly to local date string
         function formatTime(timestamp) {
             if (!timestamp) return 'Unknown';
+            // Assume UTC epoch seconds, convert to ms
             const date = new Date(timestamp * 1000);
-            return date.toLocaleString();
+            // Format as YYYY-MM-DD HH:mm:ss (local time)
+            const year = date.getFullYear();
+            const month = pad(date.getMonth() + 1);
+            const day = pad(date.getDate());
+            const hour = pad(date.getHours());
+            const minute = pad(date.getMinutes());
+            const second = pad(date.getSeconds());
+            // Output in locale string style, e.g. "2024-06-18 09:05:32"
+            return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
         }
 
         function getRelativeTime(timestamp) {
@@ -404,7 +419,9 @@
                 document.getElementById('systemStatus').textContent = '🚨 EMERGENCY';
                 document.getElementById('statusCard').classList.add('emergency');
                 document.getElementById('lastContact').textContent = getRelativeTime(data.timestamp);
-                document.getElementById('lastUpdateTime').textContent = new Date().toLocaleTimeString();
+
+                // Last update in local string
+                document.getElementById('lastUpdateTime').textContent = new Date().toLocaleString();
             }
         });
 
@@ -419,7 +436,7 @@
                 document.getElementById('systemStatus').textContent = 'Active';
                 document.getElementById('statusCard').classList.remove('emergency');
                 document.getElementById('lastContact').textContent = getRelativeTime(data.timestamp);
-                document.getElementById('lastUpdateTime').textContent = new Date().toLocaleTimeString();
+                document.getElementById('lastUpdateTime').textContent = new Date().toLocaleString();
                 emergencyActive = false;
             }
         });
